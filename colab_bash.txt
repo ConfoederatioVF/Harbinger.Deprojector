@@ -1,0 +1,11 @@
+!pip install kornia torch torchvision ninja romatch
+
+!ROMA_PATH=$(python -c "import romatch; import os; print(os.path.dirname(romatch.__file__))")
+!cd "$ROMA_PATH/models/kernels"
+!python setup.py install
+
+!python -c "import romatch; print(romatch.__file__)"
+!find / -name "local_corr*" -o -name "setup.py" -path "*/roma*" 2>/dev/null
+!find / -name "setup.py" -path "*/romatch*" 2>/dev/null
+!cat /usr/local/lib/python3.12/dist-packages/romatch/utils/local_correlation.py
+!grep -rn "local_corr" /usr/local/lib/python3.12/dist-packages/romatch/ --include="*.py"
