@@ -21,6 +21,7 @@ Requirements:
 
 <details>
   <summary>Installing dependencies from scratch:</summary>
+  
   1. This setup assumes you already have Anaconda and pip installed.
   2. `conda activate sam_env`
   3. `conda install -c conda-forge opencv numpy scipy matplotlib pillow spyder`
@@ -29,6 +30,7 @@ Requirements:
     2. Otherwise: `conda install pytorch torchvision torchaudio cpuonly -c pytorch`
   5. `pip install kornia`
   6. `pip install romatch`
+  
 </details>
 
 ## Usage:
