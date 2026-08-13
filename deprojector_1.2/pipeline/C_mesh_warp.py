@@ -156,6 +156,9 @@ def prune_control_points(
             norm_grid_y = (grid[..., 1] / (h_s - 1)) * 2.0 - 1.0
             norm_grid = torch.stack([norm_grid_x, norm_grid_y], dim=-1).unsqueeze(0)
             
+            # Constrain evaluated pixels from exceeding source bounds so we don't sample black padded space
+            norm_grid = torch.clamp(norm_grid, -1.0, 1.0)
+            
             warped = F.grid_sample(src_mask_t, norm_grid, mode="bilinear", padding_mode="zeros", align_corners=True)
             
             pm = poly_mask_t > 0.5
@@ -495,6 +498,10 @@ def sgd_point_warp_polygon_constrained(
             norm_grid_y = (grid_src[..., 1] / (h_s - 1)) * 2.0 - 1.0
             norm_grid = torch.stack([norm_grid_x, norm_grid_y], dim=-1).unsqueeze(0)
             
+            # Constrain pixels from exceeding the source image bounds
+            # This prevents clipping to black, while allowing actual control points to overshoot.
+            norm_grid = torch.clamp(norm_grid, -1.0, 1.0)
+            
             warped = F.grid_sample(src_mask_t, norm_grid, mode="bilinear", padding_mode="zeros", align_corners=True)
             
             l_dice = dice_loss_poly(warped, ref_bbox_sm, poly_mask_t)
@@ -559,6 +566,10 @@ def sgd_point_warp_polygon_constrained(
                 else:
                     final_grid = evaluate_tps(torch.from_numpy(P_src_np).to(device), L_inv, U, P_grid, work_h_bbox, work_w_bbox)
                 n_grid = torch.stack([(final_grid[..., 0]/(w_s-1))*2-1, (final_grid[..., 1]/(h_s-1))*2-1], dim=-1).unsqueeze(0)
+                
+                # Constrain pixels from exceeding the source image bounds
+                n_grid = torch.clamp(n_grid, -1.0, 1.0)
+                
                 w_mask = F.grid_sample(src_mask_t, n_grid, mode="bilinear", padding_mode="zeros", align_corners=True)
             show_mask_comparison_poly(w_mask, ref_bbox_sm, poly_mask_t, title=f"End of Level {lvl+1}")
 
@@ -603,6 +614,9 @@ def sgd_point_warp_polygon_constrained(
     norm_gx = (grid_full[..., 0] / (w_s - 1)) * 2.0 - 1.0
     norm_gy = (grid_full[..., 1] / (h_s - 1)) * 2.0 - 1.0
     norm_grid_full = torch.stack([norm_gx, norm_gy], dim=-1).unsqueeze(0)
+    
+    # Constrain pixels from exceeding the source image bounds
+    norm_grid_full = torch.clamp(norm_grid_full, -1.0, 1.0)
     
     poly_full_np = rasterise_polygon_mask(polygon, bh, bw, offset_xy=(bx0, by0))
     poly_full_t = (torch.from_numpy(poly_full_np).float() / 255.0).unsqueeze(0).unsqueeze(0).to(device)
