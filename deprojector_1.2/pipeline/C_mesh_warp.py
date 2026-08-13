@@ -270,7 +270,6 @@ def mse_loss_poly(pred: torch.Tensor, target: torch.Tensor, poly_mask: torch.Ten
     if weight_map is not None: diff_sq = diff_sq * weight_map
     return diff_sq.sum() / poly_mask.sum().clamp(min=1.0)
 
-
 # ─────────────────────────────────────────────────────────────────────
 # 5. ENSEMBLE EVALUATION HELPERS
 # ─────────────────────────────────────────────────────────────────────
@@ -318,7 +317,6 @@ def eval_warp_at_points_np(P_query: np.ndarray, P_ref: np.ndarray, P_src: np.nda
         coeffs = L_inv @ np.vstack([P_src, np.zeros((3, 2))])
         
         return U @ coeffs[:N, :] + np.hstack([np.ones((len(P_query), 1)), P_query]) @ coeffs[N:, :]
-
 
 # ─────────────────────────────────────────────────────────────────────
 # 6. VISUALIZATION HELPERS
@@ -405,7 +403,6 @@ def show_displacement_quiver(P_init: np.ndarray, P_final: np.ndarray, title: str
     ax.invert_yaxis() 
     plt.show()
 
-
 # ─────────────────────────────────────────────────────────────────────
 # 7. MAIN SGD ENSEMBLE PIPELINE
 # ─────────────────────────────────────────────────────────────────────
@@ -467,7 +464,9 @@ def sgd_point_warp_polygon_constrained(
         y_grid, x_grid = torch.meshgrid(torch.arange(work_h_bbox, device=device), torch.arange(work_w_bbox, device=device), indexing='ij')
         nx = (x_grid / (work_w_bbox - 1)) * 2.0 - 1.0
         ny = (y_grid / (work_h_bbox - 1)) * 2.0 - 1.0
-        return (1.0 + penalty * torch.max(torch.abs(nx), torch.abs(ny))).unsqueeze(0).unsqueeze(0).float()
+        # Fix: Using Euclidean distance rather than L-infinity norm to avoid square diagonal gradients (star patterns)
+        dist = torch.clamp(torch.sqrt(nx**2 + ny**2), 0.0, 1.0)
+        return (1.0 + penalty * dist).unsqueeze(0).unsqueeze(0).float()
 
     # ── Phase 3 & 4: Ensemble Optimization Logic ───────
     def run_optimization(penalty_val: float, model_name: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -578,7 +577,6 @@ def sgd_point_warp_polygon_constrained(
     P_ref_A, P_src_A, w_mask_A_np = run_optimization(edge_penalty, "Model A (High Edge Penalty)")
     P_ref_B, P_src_B, w_mask_B_np = run_optimization(0.0, "Model B (No Edge Penalty)")
 
-
     # ── Phase 5: Smart Performance-Guided NMS & Blending ──────
     print("\n▸ Phase 5: Generating Performance-Guided Hybrid Mesh")
     
@@ -596,15 +594,15 @@ def sgd_point_warp_polygon_constrained(
     # 2. Performance Weight: 1 where A is better, 0 where B is better
     W_perf = err_B_sm / (err_A_sm + err_B_sm + 1e-8)
     
-    # 3. Spatial Prior Weight: 1 at edge, 0 at center
+    # 3. Spatial Prior Weight: 1 at edge, 0 at center (Fix: Euclidean distance eliminates diagonal artifacts)
     y_grid, x_grid = np.mgrid[0:work_h_bbox, 0:work_w_bbox]
-    nx = np.abs(x_grid - work_w_bbox/2) / (work_w_bbox/2)
-    ny = np.abs(y_grid - work_h_bbox/2) / (work_h_bbox/2)
-    W_spatial = np.maximum(nx, ny)
+    nx = (x_grid - work_w_bbox / 2.0) / (work_w_bbox / 2.0)
+    ny = (y_grid - work_h_bbox / 2.0) / (work_h_bbox / 2.0)
+    W_spatial = np.clip(np.sqrt(nx**2 + ny**2), 0.0, 1.0)
     
     # 4. Final Blend & Smoothstep (sharpen transitions)
-    W_A = 0.6 * W_perf + 0.4 * W_spatial
-    W_A = np.clip(W_A, 0, 1)
+    W_A = 0.8*W_perf + 0.2*W_spatial #0.6, 0.4 normally; 1.0 W_perf optimal overfit
+    W_A = np.clip(W_A, 0.0, 1.0)
     W_A = 3 * W_A**2 - 2 * W_A**3  # Smoothstep
     
     if show_plots:
@@ -659,7 +657,6 @@ def sgd_point_warp_polygon_constrained(
         
         show_points_mesh(P_ref_hybrid, ref_crop_rs, warp_mode, hybrid_simplices, f"Final Hybrid Mesh ({warp_mode.upper()})")
         show_displacement_quiver(P_init_hybrid, P_src_hybrid, "Hybrid Control Point Displacements")
-
 
     # ── Phase 6: Full-Resolution Application ──────────────────────
     print("\n▸ Phase 6: Rendering Full-Resolution Result from Hybrid Mesh")
