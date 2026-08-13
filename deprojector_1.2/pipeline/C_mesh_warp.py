@@ -395,7 +395,8 @@ def sgd_point_warp_polygon_constrained(
     dyn_error_threshold: float = 0.05,
     dyn_min_dist: int = 15,
     prune_interval: int = 150,
-    edge_penalty: float = 0.0, # <--- NEW PARAMETER
+    edge_penalty: float = 0.0,
+    center_penalty: float = 0.0, # <--- NEW PARAMETER
     show_plots: bool = True
 ) -> Tuple[np.ndarray, np.ndarray, dict, float]:
     
@@ -435,18 +436,21 @@ def sgd_point_warp_polygon_constrained(
     src_rgb_np = cv2.cvtColor(src_img, cv2.COLOR_BGR2RGB)
     src_img_t = (torch.from_numpy(src_rgb_np).float().permute(2, 0, 1).unsqueeze(0).to(device) / 255.0)
 
-    # Compute Edge Penalty Map if requested
-    edge_weight_map = None
-    if edge_penalty > 0.0:
+    # Compute Spatial Weight Map if requested (edge and/or center penalties)
+    spatial_weight_map = None
+    if edge_penalty > 0.0 or center_penalty > 0.0:
         y_grid, x_grid = torch.meshgrid(torch.arange(work_h_bbox, device=device), torch.arange(work_w_bbox, device=device), indexing='ij')
         # Normalize to [-1, 1] for both X and Y
         nx = (x_grid / (work_w_bbox - 1)) * 2.0 - 1.0
         ny = (y_grid / (work_h_bbox - 1)) * 2.0 - 1.0
         # Chebyshev distance from the center (0 in center, 1 at edge)
-        dist_to_edge = torch.max(torch.abs(nx), torch.abs(ny))
-        # Linearly scale penalty: 1.0 at center -> (1.0 + edge_penalty) at edge
-        e_weight = 1.0 + edge_penalty * dist_to_edge
-        edge_weight_map = e_weight.unsqueeze(0).unsqueeze(0).float()
+        dist_from_center = torch.max(torch.abs(nx), torch.abs(ny))
+        
+        # Linearly scale penalty:
+        # edge_penalty is applied primarily at the edges (dist = 1)
+        # center_penalty is applied primarily at the center (dist = 0)
+        e_weight = 1.0 + (edge_penalty * dist_from_center) + (center_penalty * (1.0 - dist_from_center))
+        spatial_weight_map = e_weight.unsqueeze(0).unsqueeze(0).float()
     
     # ── Phase 3: Control Point Initialization ─────────────────────
     print("\n▸ Phase 3: Initializing Control Points")
@@ -494,7 +498,7 @@ def sgd_point_warp_polygon_constrained(
             warped = F.grid_sample(src_mask_t, norm_grid, mode="bilinear", padding_mode="zeros", align_corners=True)
             
             l_dice = dice_loss_poly(warped, ref_bbox_sm, poly_mask_t)
-            l_mse = mse_loss_poly(warped, ref_bbox_sm, poly_mask_t, weight_map=edge_weight_map)
+            l_mse = mse_loss_poly(warped, ref_bbox_sm, poly_mask_t, weight_map=spatial_weight_map)
             
             if warp_mode == "affine":
                 l_struct = fold_loss_affine(P_src_t, current_simplices)
@@ -561,10 +565,10 @@ def sgd_point_warp_polygon_constrained(
         # Add Dynamic Points if not the last level
         if lvl < levels - 1:
             with torch.no_grad():
-                # Apply the edge penalty weight to the error map so dynamic points spawn at edges more aggressively
+                # Apply the spatial penalty weight to the error map so dynamic points spawn at penalized regions more aggressively
                 base_err = torch.abs(w_mask - ref_bbox_sm) * poly_mask_t
-                if edge_weight_map is not None:
-                    base_err = base_err * edge_weight_map
+                if spatial_weight_map is not None:
+                    base_err = base_err * spatial_weight_map
                 error_map = base_err[0, 0].cpu().numpy()
                 
             old_len = len(P_ref_np)

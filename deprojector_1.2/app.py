@@ -76,7 +76,8 @@ def executePipeline():
             dyn_error_threshold=0.005,         
             dyn_min_dist=12,
             prune_interval=150,     # Attempt to strip down redundant points safely
-            edge_penalty=0,       #16.0: strong edge penalty; 1.0 no edge penalty. 8.0 best compromise?
+            center_penalty=8,
+            edge_penalty=16,       #16.0: strong edge penalty; 1.0 no edge penalty. 8.0 best compromise?
         )
     )
 
