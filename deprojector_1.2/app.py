@@ -66,19 +66,20 @@ def executePipeline():
             ref_img=ref_img,
             src_img=src_img,
             extent_result=result,
-            work_h_bbox=420,
+            work_h_bbox=420, #420 by default
             warp_mode="tps",   
             levels=4,             
             steps_per_lvl=1200,    
             lr_init=4.0, #2.0 default
             lr_gain=1.6, #0.6 by default
             lam_fold=2.0, #2.0 tends to yield best results
+            points_gain=1.5, #1.5 by default
             dyn_points_per_level=24, #24   
             dyn_error_threshold=0, #0       
             dyn_min_dist=12, #12
             prune_interval=150, # Determines step intervals during levels in which prunes may occur
-            center_penalty=16.0, #8.0
-            edge_penalty=16.0, #12.0
+            center_penalty=16.0, #16.0
+            edge_penalty=16.0, #16.0
         )
     )
 

@@ -8,6 +8,7 @@ Points are dynamically added to high-error regions and pruned if redundant durin
 from typing import Tuple, Optional, Any, Callable, List
 
 import cv2
+import math
 import numpy as np
 import scipy.spatial
 import torch
@@ -396,6 +397,7 @@ def sgd_point_warp_polygon_constrained(
     lr_init: float = 2.0,
     lam_fold: float = 0.5,
     dyn_points_per_level: int = 8,
+    points_gain: float = 1,
     dyn_error_threshold: float = 0.05,
     dyn_min_dist: int = 15,
     prune_interval: int = 150,
@@ -584,6 +586,9 @@ def sgd_point_warp_polygon_constrained(
                 error_map = base_err[0, 0].cpu().numpy()
                 
             old_len = len(P_ref_np)
+            
+            dyn_points_per_level = math.ceil(dyn_points_per_level*points_gain)
+            
             P_ref_np, P_src_np, new_pts = add_dynamic_points(
                 error_map, P_ref_np, P_src_np, final_grid.cpu().numpy(), 
                 n_points=dyn_points_per_level, 
