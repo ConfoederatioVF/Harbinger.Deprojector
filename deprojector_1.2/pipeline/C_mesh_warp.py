@@ -392,6 +392,7 @@ def sgd_point_warp_polygon_constrained(
     warp_mode: str = "affine",
     levels: int = 4,
     steps_per_lvl: int = 350,
+    lr_gain: float = 0.6,
     lr_init: float = 2.0,
     lam_fold: float = 0.5,
     dyn_points_per_level: int = 8,
@@ -469,7 +470,7 @@ def sgd_point_warp_polygon_constrained(
     current_simplices = None
     
     for lvl in range(levels):
-        lr = lr_init * (0.6 ** lvl)
+        lr = lr_init * (lr_gain ** lvl)
         print(f"  ── Level {lvl + 1}/{levels} | Points: {len(P_ref_np)} | LR: {lr:.4f}")
         
         if warp_mode == "affine":
