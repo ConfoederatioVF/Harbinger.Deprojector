@@ -68,16 +68,16 @@ def executePipeline():
             extent_result=result,
             work_h_bbox=420,
             warp_mode="tps",   
-            levels=5,             
+            levels=4,             
             steps_per_lvl=1200,    
             lr_init=2.0,          
-            lam_fold=0.2,          
+            lam_fold=0.5,          
             dyn_points_per_level=24,          
             dyn_error_threshold=0.005,         
             dyn_min_dist=12,
             prune_interval=150,     # Attempt to strip down redundant points safely
             center_penalty=8,
-            edge_penalty=16,       #16.0: strong edge penalty; 1.0 no edge penalty. 8.0 best compromise?
+            edge_penalty=8,       #16.0: strong edge penalty; 1.0 no edge penalty. 8.0 best compromise?
         )
     )
 
