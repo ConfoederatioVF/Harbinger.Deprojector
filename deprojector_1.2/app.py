@@ -68,10 +68,10 @@ def executePipeline():
             extent_result=result,
             work_h_bbox=420, #420 by default
             warp_mode="tps",   
-            levels=3, # 3 for luck
+            levels=3, # 3 for luck; 4 for general-purpose
             steps_per_lvl=1200,    
             lr_init=4.0, #2.0; 4.0 default
-            lr_gain=1.6, #0.6 by default
+            lr_gain=1.6, #0.6; 1.6 by default
             lam_fold=2.0, #2.0 tends to yield best results
             points_gain=1.5, #1.5 by default
             dyn_points_per_level=24, #24   
