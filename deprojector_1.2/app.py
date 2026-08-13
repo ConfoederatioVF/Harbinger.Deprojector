@@ -67,18 +67,14 @@ def executePipeline():
             src_img=src_img,
             extent_result=result,
             work_h_bbox=420,
-            warp_mode="tps",   
-            levels=4,             
-            steps_per_lvl=1200,    
-            lr_init=2.0,          
-            lam_fold=0.5,          
-            dyn_points_per_level=128,          
-            dyn_error_threshold=0.001,         
-            dyn_min_dist=12,
-            prune_interval=150,
-            #16.0 = no edge distortion, high centre distortion; 
-            #1.0 = no centre distortion, high edge distortion
-            edge_penalty=16.0
+            warp_mode="tps",   # Toggle to "tps" if you want Thin Plate Spline!
+            levels=5,             # Number of coarse-to-fine dynamic point injection steps
+            steps_per_lvl=1200,    # Steps for SGD to optimize the points per level
+            lr_init=2.0,          # Initial learning rate for point movement
+            lam_fold=0.2,          # Regularization weight to prevent mesh folding/artifacts
+            dyn_points_per_level=24,          
+            dyn_error_threshold=0.005,         # Make it slightly more sensitive to small errors
+            dyn_min_dist=12,                  # Allow points to be slightly closer together
         )
     )
 
