@@ -71,13 +71,13 @@ def executePipeline():
             levels=4,             
             steps_per_lvl=1200,    
             lr_init=2.0,          
-            lam_fold=0.5,          
+            lam_fold=0.5, #0.5 tends to yield best results
             dyn_points_per_level=24,          
             dyn_error_threshold=0.005,         
             dyn_min_dist=12,
-            prune_interval=150,     # Attempt to strip down redundant points safely
-            center_penalty=8,
-            edge_penalty=12,       #16.0: strong edge penalty; 1.0 no edge penalty. 8.0 best compromise?
+            prune_interval=150, # Determines step intervals during levels in which prunes may occur
+            center_penalty=0, #8.0
+            edge_penalty=0, #12.0
         )
     )
 
