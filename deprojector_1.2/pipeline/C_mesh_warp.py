@@ -88,14 +88,13 @@ def init_control_points(
 
 def apply_affine_to_points(pts: np.ndarray, src_pts: np.ndarray, ref_pts: np.ndarray, bbox: dict) -> np.ndarray:
     """Maps reference points to initial source locations using RANSAC Affine."""
-    # Convert working-bbox coords to full coords for matrix calc
     full_pts = pts.copy()
     full_pts[:, 0] += bbox["x0"]
     full_pts[:, 1] += bbox["y0"]
     
     M, _ = cv2.estimateAffine2D(ref_pts.astype(np.float32), src_pts.astype(np.float32), method=cv2.RANSAC)
     if M is None:
-        return pts.copy() # Fallback to identity mapping if affine fails
+        return pts.copy().astype(np.float32)
         
     ones = np.ones((len(full_pts), 1))
     pts_h = np.hstack([full_pts, ones])
@@ -105,31 +104,32 @@ def apply_affine_to_points(pts: np.ndarray, src_pts: np.ndarray, ref_pts: np.nda
 def add_dynamic_points(
     error_map_np: np.ndarray, P_ref_np: np.ndarray, P_src_np: np.ndarray, 
     current_grid_np: np.ndarray, n_points: int = 5, min_dist: int = 20
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Finds high-error regions and inserts new control points there."""
     err = cv2.GaussianBlur(error_map_np.astype(np.float32), (9, 9), 0)
     new_refs, new_srcs = [], []
     
     for _ in range(n_points):
         min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(err)
-        if max_val < 0.05: # Error threshold
+        if max_val < 0.05: 
             break
             
-        # Ensure it's not too close to existing points
         dist = np.linalg.norm(P_ref_np - np.array(max_loc), axis=1)
         if np.any(dist < min_dist):
             cv2.circle(err, max_loc, min_dist, 0, -1)
             continue
             
         new_refs.append([max_loc[0], max_loc[1]])
-        new_srcs.append(current_grid_np[max_loc[1], max_loc[0]]) # Map to its current source interpolation
+        new_srcs.append(current_grid_np[max_loc[1], max_loc[0]]) 
         cv2.circle(err, max_loc, min_dist, 0, -1)
         
+    new_refs_np = np.array(new_refs, dtype=np.float32) if new_refs else np.empty((0, 2), dtype=np.float32)
     if new_refs:
-        P_ref_np = np.vstack([P_ref_np, new_refs])
-        P_src_np = np.vstack([P_src_np, new_srcs])
+        # Enforce float32 concatenation to prevent double upcasting
+        P_ref_np = np.vstack([P_ref_np, new_refs]).astype(np.float32)
+        P_src_np = np.vstack([P_src_np, new_srcs]).astype(np.float32)
         
-    return P_ref_np, P_src_np
+    return P_ref_np, P_src_np, new_refs_np
 
 # ─────────────────────────────────────────────────────────────────────
 # 3. DIFFERENTIABLE WARPING KERNELS (AFFINE & TPS)
@@ -143,7 +143,6 @@ def precompute_affine_barycentric(P_ref_np: np.ndarray, H: int, W: int) -> Tuple
     
     simplices = delaunay.find_simplex(grid_pts)
     
-    # Scipy transform matrix for barycentric coords: T_inv @ (P - C)
     T_inv = delaunay.transform[simplices, :2]
     C = delaunay.transform[simplices, 2]
     B = grid_pts - C
@@ -161,13 +160,12 @@ def precompute_affine_barycentric(P_ref_np: np.ndarray, H: int, W: int) -> Tuple
 
 def evaluate_affine(P_src: torch.Tensor, indices: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
     """Differentiable Affine Triangulation forward pass."""
-    # (H, W, 3, 2)
     src_triangles = P_src[indices] 
-    # (H, W, 2) = Sum of (vertices * weights)
     return (src_triangles * weights.unsqueeze(-1)).sum(dim=2)
 
 def precompute_tps_matrices(P_ref: torch.Tensor, H: int, W: int, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Precomputes Thin Plate Spline invariant matrices."""
+    P_ref = P_ref.float() # Ensure float32 to prevent cdist type mismatch
     N = P_ref.shape[0]
     dist = torch.cdist(P_ref, P_ref)
     K = dist ** 2 * torch.log(dist + 1e-8)
@@ -177,7 +175,7 @@ def precompute_tps_matrices(P_ref: torch.Tensor, H: int, W: int, device: torch.d
     L[:N, :N] = K
     L[:N, N:] = P
     L[N:, :N] = P.t()
-    L = L + torch.eye(N + 3, device=device) * 1e-5 # Reg to prevent singularities
+    L = L + torch.eye(N + 3, device=device) * 1e-5 
     
     L_inv = torch.linalg.pinv(L)
     
@@ -206,16 +204,13 @@ def evaluate_tps(P_src: torch.Tensor, L_inv: torch.Tensor, U: torch.Tensor, P_gr
 # ─────────────────────────────────────────────────────────────────────
 
 def fold_loss_affine(P_src: torch.Tensor, simplices: np.ndarray) -> torch.Tensor:
-    """Penalizes inverted triangles (where signed area becomes negative)."""
     A = P_src[simplices[:, 0]]
     B = P_src[simplices[:, 1]]
     C = P_src[simplices[:, 2]]
-    # Cross product
     area = (B[:, 0] - A[:, 0]) * (C[:, 1] - A[:, 1]) - (B[:, 1] - A[:, 1]) * (C[:, 0] - A[:, 0])
     return F.relu(-area + 0.1).mean()
 
 def bend_loss_tps(P_src: torch.Tensor, L_inv: torch.Tensor, N: int) -> torch.Tensor:
-    """Penalizes extreme TPS warp bending."""
     Y = torch.cat([P_src, torch.zeros(3, 2, device=P_src.device)], dim=0)
     coeffs = L_inv @ Y
     W_mat = coeffs[:N, :]
@@ -235,17 +230,99 @@ def mse_loss_poly(pred: torch.Tensor, target: torch.Tensor, poly_mask: torch.Ten
 # 5. VISUALIZATION HELPERS
 # ─────────────────────────────────────────────────────────────────────
 
-def show_points_mesh(P_ref_np: np.ndarray, ref_img_np: np.ndarray, simplices: Optional[np.ndarray] = None, title: str = "Mesh"):
+def show_extent_initialisation(ref_img: np.ndarray, src_img: np.ndarray, extent_result: ExtentResult, bbox: dict):
+    fig, axes = plt.subplots(1, 3, figsize=(24, 7))
+    src_rgb = cv2.cvtColor(src_img, cv2.COLOR_BGR2RGB) if len(src_img.shape) == 3 else src_img
+    axes[0].imshow(src_rgb, cmap="gray")
+    axes[0].set_title(f"Source  {src_img.shape[1]}×{src_img.shape[0]}")
+    axes[0].axis("off")
+
+    vis = ref_img.copy()
+    if extent_result.polygon is not None:
+        pts = extent_result.polygon.astype(np.int32)
+        cv2.polylines(vis, [pts], True, (0, 255, 0), 3, cv2.LINE_AA)
+    bx0, by0, bx1, by1 = bbox["x0"], bbox["y0"], bbox["x1"], bbox["y1"]
+    cv2.rectangle(vis, (bx0, by0), (bx1, by1), (0, 200, 255), 2)
+
+    axes[1].imshow(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB))
+    axes[1].set_title(f"Extent polygon (green) + tight bbox (cyan)\nconf={extent_result.confidence:.3f}")
+    axes[1].axis("off")
+
+    vis2 = ref_img.copy()
+    if extent_result.ref_pts is not None and len(extent_result.ref_pts) > 0:
+        n_show = min(200, len(extent_result.ref_pts))
+        idx = np.random.choice(len(extent_result.ref_pts), n_show, replace=False)
+        for i in idx:
+            cv2.circle(vis2, (int(extent_result.ref_pts[i, 0]), int(extent_result.ref_pts[i, 1])), 4, (0, 0, 255), -1)
+        if extent_result.polygon is not None:
+            cv2.polylines(vis2, [extent_result.polygon.astype(np.int32)], True, (0, 255, 0), 2, cv2.LINE_AA)
+    
+    axes[2].imshow(cv2.cvtColor(vis2, cv2.COLOR_BGR2RGB))
+    axes[2].set_title("Inlier correspondences")
+    axes[2].axis("off")
+    plt.tight_layout()
+    plt.show()
+
+def show_mask_comparison_poly(warped_mask: torch.Tensor, ref_mask: torch.Tensor, poly_mask: torch.Tensor, title: str = ""):
+    wm = warped_mask[0, 0].cpu().numpy()
+    rm = ref_mask[0, 0].cpu().numpy()
+    pm = poly_mask[0, 0].cpu().numpy() > 0.5
+
+    fig, axes = plt.subplots(1, 4, figsize=(28, 5))
+    axes[0].imshow(wm, cmap="gray"); axes[0].set_title("Warped Source Mask")
+    axes[1].imshow(rm, cmap="gray"); axes[1].set_title("Reference Mask (bbox crop)")
+    axes[2].imshow(pm, cmap="gray"); axes[2].set_title("Polygon Mask")
+
+    rgb = np.zeros((*rm.shape, 3))
+    hit, miss, extra = (wm > 0.5) & (rm > 0.5) & pm, (rm > 0.5) & (wm <= 0.5) & pm, (wm > 0.5) & (rm <= 0.5) & pm
+    rgb[hit, 1] = 1.0; rgb[miss, 0] = 1.0; rgb[extra, 2] = 1.0
+    axes[3].imshow(rgb)
+    axes[3].set_title("Within polygon: G=hit R=miss B=extra")
+
+    for ax in axes: ax.axis("off")
+    if title: fig.suptitle(title, fontsize=14)
+    plt.tight_layout()
+    plt.show()
+
+def show_points_mesh(P_ref_np: np.ndarray, ref_img_np: np.ndarray, warp_mode: str, simplices: Optional[np.ndarray] = None, title: str = "Mesh"):
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.imshow(cv2.cvtColor(ref_img_np, cv2.COLOR_BGR2RGB))
     
-    if simplices is not None:
-        ax.triplot(P_ref_np[:, 0], P_ref_np[:, 1], simplices, color='cyan', lw=1.5, alpha=0.8)
+    if warp_mode == "affine" and simplices is not None:
+        ax.triplot(P_ref_np[:, 0], P_ref_np[:, 1], simplices, color='cyan', lw=1.2, alpha=0.8)
+    elif warp_mode == "tps":
+        pass
     
-    ax.plot(P_ref_np[:, 0], P_ref_np[:, 1], 'yo', markersize=4)
+    ax.plot(P_ref_np[:, 0], P_ref_np[:, 1], 'yo', markersize=5, markeredgecolor='black')
     ax.set_title(title)
     ax.axis("off")
     plt.tight_layout()
+    plt.show()
+
+def show_dynamic_points_error(error_map: np.ndarray, old_pts: np.ndarray, new_pts: np.ndarray, lvl: int):
+    fig, ax = plt.subplots(figsize=(8, 6))
+    im = ax.imshow(error_map, cmap='magma')
+    ax.scatter(old_pts[:, 0], old_pts[:, 1], c='cyan', s=10, label='Existing Points')
+    if len(new_pts) > 0:
+        ax.scatter(new_pts[:, 0], new_pts[:, 1], c='red', marker='*', s=80, label='New Dynamic Points')
+    ax.legend(loc="upper right")
+    ax.set_title(f"Level {lvl} Error Map & Dynamic Point Injection")
+    plt.colorbar(im, ax=ax)
+    ax.axis('off')
+    plt.show()
+
+def show_displacement_quiver(P_init: np.ndarray, P_final: np.ndarray, title: str = "Control Point Movement"):
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.scatter(P_init[:, 0], P_init[:, 1], c='blue', s=20, label='Initial Position', alpha=0.6)
+    ax.scatter(P_final[:, 0], P_final[:, 1], c='red', s=20, label='Optimized Position', alpha=0.6)
+    
+    for i in range(len(P_init)):
+        ax.arrow(P_init[i, 0], P_init[i, 1], P_final[i, 0] - P_init[i, 0], P_final[i, 1] - P_init[i, 1],
+                 head_width=2, head_length=3, fc='black', ec='black', alpha=0.4)
+        
+    ax.set_title(title)
+    ax.legend()
+    ax.invert_yaxis() 
     plt.show()
 
 # ─────────────────────────────────────────────────────────────────────
@@ -262,6 +339,7 @@ def sgd_point_warp_polygon_constrained(
     steps_per_lvl: int = 350,
     lr_init: float = 2.0,
     lam_fold: float = 0.5,
+    show_plots: bool = True
 ) -> Tuple[np.ndarray, np.ndarray, dict, float]:
     
     if extent_result.polygon is None:
@@ -278,6 +356,9 @@ def sgd_point_warp_polygon_constrained(
     bbox = polygon_tight_bbox(polygon, ref_img.shape)
     bx0, by0, bx1, by1 = bbox["x0"], bbox["y0"], bbox["x1"], bbox["y1"]
     bw, bh = bx1 - bx0, by1 - by0
+    
+    if show_plots:
+        show_extent_initialisation(ref_img, src_img, extent_result, bbox)
     
     work_w_bbox = int(work_h_bbox * (bw / bh))
     scale_x, scale_y = work_w_bbox / bw, work_h_bbox / bh
@@ -301,6 +382,7 @@ def sgd_point_warp_polygon_constrained(
     print("\n▸ Phase 3: Initializing Control Points")
     P_ref_np = init_control_points(bbox, poly_mask_work_np, grid_size=6)
     P_src_np = apply_affine_to_points(P_ref_np / [scale_x, scale_y], extent_result.src_pts, extent_result.ref_pts, bbox)
+    P_src_original_init = P_src_np.copy()
     
     print(f"  Initialized {len(P_ref_np)} control points.")
     
@@ -313,41 +395,38 @@ def sgd_point_warp_polygon_constrained(
         lr = lr_init * (0.6 ** lvl)
         print(f"  ── Level {lvl + 1}/{levels} | Points: {len(P_ref_np)} | LR: {lr:.4f}")
         
-        # Precompute mappings for current topology
         if warp_mode == "affine":
             idx_t, wt_t, current_simplices = precompute_affine_barycentric(P_ref_np, work_h_bbox, work_w_bbox)
             idx_t, wt_t = idx_t.to(device), wt_t.to(device)
         else:
-            L_inv, U, P_grid = precompute_tps_matrices(torch.from_numpy(P_ref_np).to(device), work_h_bbox, work_w_bbox, device)
+            # Ensured explicitly Float32 loading via .float() to prevent Double mismatch
+            L_inv, U, P_grid = precompute_tps_matrices(torch.from_numpy(P_ref_np).float().to(device), work_h_bbox, work_w_bbox, device)
             
         P_src_t = torch.tensor(P_src_np, dtype=torch.float32, device=device, requires_grad=True)
         optim = torch.optim.Adam([P_src_t], lr=lr)
         
         best_loss = float('inf')
         best_P_src = P_src_np.copy()
+        losses_log = []
         
         # SGD Loop
         for step in range(steps_per_lvl):
             optim.zero_grad()
             
-            # Forward Pass: Build Grid
             if warp_mode == "affine":
                 grid_src = evaluate_affine(P_src_t, idx_t, wt_t)
             else:
                 grid_src = evaluate_tps(P_src_t, L_inv, U, P_grid, work_h_bbox, work_w_bbox)
                 
-            # Normalize for grid_sample: [-1, 1]
             norm_grid_x = (grid_src[..., 0] / (w_s - 1)) * 2.0 - 1.0
             norm_grid_y = (grid_src[..., 1] / (h_s - 1)) * 2.0 - 1.0
             norm_grid = torch.stack([norm_grid_x, norm_grid_y], dim=-1).unsqueeze(0)
             
-            # Warp Src Mask
             warped = F.grid_sample(src_mask_t, norm_grid, mode="bilinear", padding_mode="zeros", align_corners=True)
             
             l_dice = dice_loss_poly(warped, ref_bbox_sm, poly_mask_t)
             l_mse = mse_loss_poly(warped, ref_bbox_sm, poly_mask_t)
             
-            # Structural/Fold Loss
             if warp_mode == "affine":
                 l_struct = fold_loss_affine(P_src_t, current_simplices)
             else:
@@ -356,6 +435,8 @@ def sgd_point_warp_polygon_constrained(
             loss = l_dice + l_mse + lam_fold * l_struct
             loss.backward()
             optim.step()
+            
+            losses_log.append(loss.item())
             
             if loss.item() < best_loss:
                 best_loss = loss.item()
@@ -367,34 +448,44 @@ def sgd_point_warp_polygon_constrained(
         # Post-level updates
         P_src_np = best_P_src.copy()
         
-        # Add Dynamic Points if not the last level
-        if lvl < levels - 1:
+        if show_plots:
+            plt.figure(figsize=(6, 3))
+            plt.plot(losses_log, linewidth=1.5)
+            plt.title(f"Level {lvl + 1} Loss Curve")
+            plt.grid(True, alpha=0.3)
+            plt.show()
+
             with torch.no_grad():
                 if warp_mode == "affine":
                     final_grid = evaluate_affine(torch.from_numpy(P_src_np).to(device), idx_t, wt_t)
                 else:
                     final_grid = evaluate_tps(torch.from_numpy(P_src_np).to(device), L_inv, U, P_grid, work_h_bbox, work_w_bbox)
-                    
-                n_gx = (final_grid[..., 0] / (w_s - 1)) * 2.0 - 1.0
-                n_gy = (final_grid[..., 1] / (h_s - 1)) * 2.0 - 1.0
-                n_grid = torch.stack([n_gx, n_gy], dim=-1).unsqueeze(0)
-                
+                n_grid = torch.stack([(final_grid[..., 0]/(w_s-1))*2-1, (final_grid[..., 1]/(h_s-1))*2-1], dim=-1).unsqueeze(0)
                 w_mask = F.grid_sample(src_mask_t, n_grid, mode="bilinear", padding_mode="zeros", align_corners=True)
+            show_mask_comparison_poly(w_mask, ref_bbox_sm, poly_mask_t, title=f"End of Level {lvl+1}")
+
+        if lvl < levels - 1:
+            with torch.no_grad():
                 error_map = (torch.abs(w_mask - ref_bbox_sm) * poly_mask_t)[0, 0].cpu().numpy()
                 
             old_len = len(P_ref_np)
-            P_ref_np, P_src_np = add_dynamic_points(error_map, P_ref_np, P_src_np, final_grid.cpu().numpy(), n_points=8, min_dist=15)
+            old_pts_for_plot = P_ref_np.copy()
+            P_ref_np, P_src_np, new_pts = add_dynamic_points(error_map, P_ref_np, P_src_np, final_grid.cpu().numpy(), n_points=8, min_dist=15)
             print(f"     [Dynamic] Added {len(P_ref_np) - old_len} points in high-error regions.")
+            
+            if show_plots:
+                show_dynamic_points_error(error_map, old_pts_for_plot, new_pts, lvl+1)
 
-    # Show final local mesh
-    ref_crop_np = ref_img[by0:by1, bx0:bx1]
-    ref_crop_rs = cv2.resize(ref_crop_np, (work_w_bbox, work_h_bbox))
-    show_points_mesh(P_ref_np, ref_crop_rs, current_simplices, f"Optimized Mesh ({warp_mode.upper()})")
+    if show_plots:
+        ref_crop_np = ref_img[by0:by1, bx0:bx1]
+        ref_crop_rs = cv2.resize(ref_crop_np, (work_w_bbox, work_h_bbox))
+        show_points_mesh(P_ref_np, ref_crop_rs, warp_mode, current_simplices, f"Optimized Mesh ({warp_mode.upper()})")
+        show_displacement_quiver(P_src_original_init, P_src_np[:len(P_src_original_init)], "Control Point Displacements (Src Image Coordinates)")
 
     # ── Phase 5: Full-Resolution Application ──────────────────────
     print("\n▸ Phase 5: Rendering Full-Resolution Result")
     
-    P_ref_full = P_ref_np.copy()
+    P_ref_full = P_ref_np.copy().astype(np.float32)
     P_ref_full[:, 0] /= scale_x
     P_ref_full[:, 1] /= scale_y
     
@@ -402,7 +493,7 @@ def sgd_point_warp_polygon_constrained(
         idx_f, wt_f, _ = precompute_affine_barycentric(P_ref_full, bh, bw)
         grid_full = evaluate_affine(torch.from_numpy(P_src_np).to(device), idx_f.to(device), wt_f.to(device))
     else:
-        L_inv_f, U_f, P_grid_f = precompute_tps_matrices(torch.from_numpy(P_ref_full).to(device), bh, bw, device)
+        L_inv_f, U_f, P_grid_f = precompute_tps_matrices(torch.from_numpy(P_ref_full).float().to(device), bh, bw, device)
         grid_full = evaluate_tps(torch.from_numpy(P_src_np).to(device), L_inv_f, U_f, P_grid_f, bh, bw)
 
     norm_gx = (grid_full[..., 0] / (w_s - 1)) * 2.0 - 1.0
@@ -447,17 +538,34 @@ def sgd_point_warp_polygon_constrained(
     print(f"  Final Polygon IoU: {final_iou.item():.4f}")
     
     # ── Phase 6: Result Visualization ─────────────────────────────
-    plt.figure(figsize=(12, 6))
-    overlay = cv2.addWeighted(ref_img, 0.45, canvas_np, 0.55, 0)
-    poly_mask_vis = rasterise_polygon_mask(polygon, h_r, w_r)
-    overlay[poly_mask_vis == 0] = ref_img[poly_mask_vis == 0]
-    cv2.polylines(overlay, [polygon.astype(np.int32)], True, (0, 255, 0), 3, cv2.LINE_AA)
-    
-    plt.imshow(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB))
-    plt.title(f"Overlay Result (IoU: {final_iou.item():.4f} | Mode: {warp_mode.upper()})")
-    plt.axis("off")
-    plt.tight_layout()
-    plt.show()
+    if show_plots:
+        show_mask_comparison_poly(w_mask_full_t[:, :, by0:by1, bx0:bx1], 
+                                  r_mask_full_t[:, :, by0:by1, bx0:bx1], 
+                                  poly_full_t, title=f"Final Full-Res Overlap (IoU={final_iou.item():.4f})")
+        
+        plt.figure(figsize=(12, 6))
+        overlay = cv2.addWeighted(ref_img, 0.45, canvas_np, 0.55, 0)
+        poly_mask_vis = rasterise_polygon_mask(polygon, h_r, w_r)
+        overlay[poly_mask_vis == 0] = ref_img[poly_mask_vis == 0]
+        cv2.polylines(overlay, [polygon.astype(np.int32)], True, (0, 255, 0), 3, cv2.LINE_AA)
+        
+        plt.imshow(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB))
+        plt.title(f"Overlay Result (IoU: {final_iou.item():.4f} | Mode: {warp_mode.upper()})")
+        plt.axis("off")
+        plt.tight_layout()
+        plt.show()
+        
+        fig, axes = plt.subplots(1, 3, figsize=(24, 7))
+        axes[0].imshow(cv2.cvtColor(src_img, cv2.COLOR_BGR2RGB))
+        axes[0].set_title("Original Source")
+        axes[1].imshow(cv2.cvtColor(warped_bbox_bgr, cv2.COLOR_BGR2RGB))
+        axes[1].set_title("Warped Source (bbox crop)")
+        axes[2].imshow(cv2.cvtColor(ref_img[by0:by1, bx0:bx1], cv2.COLOR_BGR2RGB))
+        axes[2].set_title("Reference (bbox crop)")
+        for ax in axes: ax.axis("off")
+        fig.suptitle(f"Bbox Region Comparison  —  polygon IoU = {final_iou:.4f}", fontsize=15)
+        plt.tight_layout()
+        plt.show()
 
     print("\n✓ Done.")
     return canvas_np, grid_full.cpu().numpy(), bbox, final_iou.item()

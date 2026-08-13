@@ -62,15 +62,16 @@ def executePipeline():
     # CHANGED: Polygon-constrained control point mesh warp optimisation
     warped_result, learned_disp, detected_bbox, final_iou = (
         sgd_point_warp_polygon_constrained(
+            show_plots=True,
             ref_img=ref_img,
             src_img=src_img,
             extent_result=result,
             work_h_bbox=384,
             warp_mode="tps",   # Toggle to "tps" if you want Thin Plate Spline!
             levels=4,             # Number of coarse-to-fine dynamic point injection steps
-            steps_per_lvl=350,    # Steps for SGD to optimize the points per level
+            steps_per_lvl=600,    # Steps for SGD to optimize the points per level
             lr_init=2.0,          # Initial learning rate for point movement
-            lam_fold=0.5          # Regularization weight to prevent mesh folding/artifacts
+            lam_fold=0.2          # Regularization weight to prevent mesh folding/artifacts
         )
     )
 
