@@ -156,9 +156,6 @@ def prune_control_points(
             norm_grid_y = (grid[..., 1] / (h_s - 1)) * 2.0 - 1.0
             norm_grid = torch.stack([norm_grid_x, norm_grid_y], dim=-1).unsqueeze(0)
             
-            # Constrain evaluated pixels from exceeding source bounds so we don't sample black padded space
-            norm_grid = torch.clamp(norm_grid, -1.0, 1.0)
-            
             warped = F.grid_sample(src_mask_t, norm_grid, mode="bilinear", padding_mode="zeros", align_corners=True)
             
             pm = poly_mask_t > 0.5
@@ -399,7 +396,7 @@ def sgd_point_warp_polygon_constrained(
     dyn_min_dist: int = 15,
     prune_interval: int = 150,
     edge_penalty: float = 0.0,
-    center_penalty: float = 0.0, # <--- NEW PARAMETER
+    center_penalty: float = 0.0,
     show_plots: bool = True
 ) -> Tuple[np.ndarray, np.ndarray, dict, float]:
     
@@ -498,10 +495,6 @@ def sgd_point_warp_polygon_constrained(
             norm_grid_y = (grid_src[..., 1] / (h_s - 1)) * 2.0 - 1.0
             norm_grid = torch.stack([norm_grid_x, norm_grid_y], dim=-1).unsqueeze(0)
             
-            # Constrain pixels from exceeding the source image bounds
-            # This prevents clipping to black, while allowing actual control points to overshoot.
-            norm_grid = torch.clamp(norm_grid, -1.0, 1.0)
-            
             warped = F.grid_sample(src_mask_t, norm_grid, mode="bilinear", padding_mode="zeros", align_corners=True)
             
             l_dice = dice_loss_poly(warped, ref_bbox_sm, poly_mask_t)
@@ -512,7 +505,15 @@ def sgd_point_warp_polygon_constrained(
             else:
                 l_struct = bend_loss_tps(P_src_t, L_inv, len(P_ref_np))
                 
-            loss = l_dice + l_mse + lam_fold * l_struct
+            # Boundary containment penalty:
+            # Prevents the source image from physically exceeding the parent bounding box.
+            # We enforce that the mapped reference grid fully covers the source image [-1, 1].
+            min_x, max_x = norm_grid_x.min(), norm_grid_x.max()
+            min_y, max_y = norm_grid_y.min(), norm_grid_y.max()
+            l_bounds = F.relu(min_x + 1.0) + F.relu(1.0 - max_x) + \
+                       F.relu(min_y + 1.0) + F.relu(1.0 - max_y)
+                
+            loss = l_dice + l_mse + lam_fold * l_struct + 10.0 * l_bounds
             loss.backward()
             optim.step()
             
@@ -523,7 +524,7 @@ def sgd_point_warp_polygon_constrained(
                 best_P_src = P_src_t.detach().cpu().numpy()
                 
             if (step + 1) % 100 == 0 or step == steps_per_lvl - 1:
-                print(f"     step {step+1:4d} | loss={loss.item():.4f} | dice={l_dice.item():.4f} | struct={l_struct.item():.4f}")
+                print(f"     step {step+1:4d} | loss={loss.item():.4f} | dice={l_dice.item():.4f} | struct={l_struct.item():.4f} | bounds={l_bounds.item():.4f}")
 
             # ── Prune Redundant Control Points Check ────────────────
             if prune_interval > 0 and (step + 1) % prune_interval == 0 and (step + 1) < steps_per_lvl:
@@ -566,9 +567,6 @@ def sgd_point_warp_polygon_constrained(
                 else:
                     final_grid = evaluate_tps(torch.from_numpy(P_src_np).to(device), L_inv, U, P_grid, work_h_bbox, work_w_bbox)
                 n_grid = torch.stack([(final_grid[..., 0]/(w_s-1))*2-1, (final_grid[..., 1]/(h_s-1))*2-1], dim=-1).unsqueeze(0)
-                
-                # Constrain pixels from exceeding the source image bounds
-                n_grid = torch.clamp(n_grid, -1.0, 1.0)
                 
                 w_mask = F.grid_sample(src_mask_t, n_grid, mode="bilinear", padding_mode="zeros", align_corners=True)
             show_mask_comparison_poly(w_mask, ref_bbox_sm, poly_mask_t, title=f"End of Level {lvl+1}")
@@ -614,9 +612,6 @@ def sgd_point_warp_polygon_constrained(
     norm_gx = (grid_full[..., 0] / (w_s - 1)) * 2.0 - 1.0
     norm_gy = (grid_full[..., 1] / (h_s - 1)) * 2.0 - 1.0
     norm_grid_full = torch.stack([norm_gx, norm_gy], dim=-1).unsqueeze(0)
-    
-    # Constrain pixels from exceeding the source image bounds
-    norm_grid_full = torch.clamp(norm_grid_full, -1.0, 1.0)
     
     poly_full_np = rasterise_polygon_mask(polygon, bh, bw, offset_xy=(bx0, by0))
     poly_full_t = (torch.from_numpy(poly_full_np).float() / 255.0).unsqueeze(0).unsqueeze(0).to(device)
