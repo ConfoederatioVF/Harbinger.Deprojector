@@ -70,11 +70,11 @@ def executePipeline():
             warp_mode="tps",   
             levels=4,             
             steps_per_lvl=1200,    
-            lr_init=2.0,          
-            lam_fold=0.5, #0.5 tends to yield best results
-            dyn_points_per_level=24,          
-            dyn_error_threshold=0.005,         
-            dyn_min_dist=12,
+            lr_init=2.0, #2.0 default
+            lam_fold=2.0, #1.5 tends to yield best results
+            dyn_points_per_level=24, #24   
+            dyn_error_threshold=0, #0.005       
+            dyn_min_dist=12, #12
             prune_interval=150, # Determines step intervals during levels in which prunes may occur
             center_penalty=0, #8.0
             edge_penalty=0, #12.0

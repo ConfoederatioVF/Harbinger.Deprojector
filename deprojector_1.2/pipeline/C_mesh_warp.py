@@ -156,7 +156,9 @@ def prune_control_points(
             norm_grid_y = (grid[..., 1] / (h_s - 1)) * 2.0 - 1.0
             norm_grid = torch.stack([norm_grid_x, norm_grid_y], dim=-1).unsqueeze(0)
             
-            # Smooth unconstrained evaluation (OOB safely padded as zero)
+            # Constrain evaluated pixels from exceeding source bounds so we don't sample black padded space
+            norm_grid = torch.clamp(norm_grid, -1.0, 1.0)
+            
             warped = F.grid_sample(src_mask_t, norm_grid, mode="bilinear", padding_mode="zeros", align_corners=True)
             
             pm = poly_mask_t > 0.5
@@ -171,6 +173,7 @@ def prune_control_points(
     keep_mask = np.ones(len(P_ref_np), dtype=bool)
     removed_count = 0
     
+    # Identify corners to protect them from pruning (required for bounds stability)
     is_corner = np.zeros(len(P_ref_np), dtype=bool)
     for i, pt in enumerate(P_ref_np):
         x, y = pt[0], pt[1]
@@ -396,7 +399,7 @@ def sgd_point_warp_polygon_constrained(
     dyn_min_dist: int = 15,
     prune_interval: int = 150,
     edge_penalty: float = 0.0,
-    center_penalty: float = 0.0,
+    center_penalty: float = 0.0, # <--- NEW PARAMETER
     show_plots: bool = True
 ) -> Tuple[np.ndarray, np.ndarray, dict, float]:
     
@@ -409,21 +412,10 @@ def sgd_point_warp_polygon_constrained(
     h_r, w_r = ref_img.shape[:2]
     h_s, w_s = src_img.shape[:2]
     
-    # ── Phase 1: Context & Bounding Box (Padded to Prevent Clipping) ──
+    # ── Phase 1: Context & Bounding Box ───────────────────────────
     polygon = extent_result.polygon
-    tight_box = polygon_tight_bbox(polygon, ref_img.shape)
-    
-    # Add 15% margin so the optimizer has room to warp without clipping off the edge
-    bw_tight = tight_box["x1"] - tight_box["x0"]
-    bh_tight = tight_box["y1"] - tight_box["y0"]
-    pad_x = int(bw_tight * 0.15)
-    pad_y = int(bh_tight * 0.15)
-    
-    bx0 = max(0, tight_box["x0"] - pad_x)
-    by0 = max(0, tight_box["y0"] - pad_y)
-    bx1 = min(w_r - 1, tight_box["x1"] + pad_x)
-    by1 = min(h_r - 1, tight_box["y1"] + pad_y)
-    bbox = {"x0": bx0, "y0": by0, "x1": bx1, "y1": by1}
+    bbox = polygon_tight_bbox(polygon, ref_img.shape)
+    bx0, by0, bx1, by1 = bbox["x0"], bbox["y0"], bbox["x1"], bbox["y1"]
     bw, bh = bx1 - bx0, by1 - by0
     
     if show_plots:
@@ -447,24 +439,21 @@ def sgd_point_warp_polygon_constrained(
     src_rgb_np = cv2.cvtColor(src_img, cv2.COLOR_BGR2RGB)
     src_img_t = (torch.from_numpy(src_rgb_np).float().permute(2, 0, 1).unsqueeze(0).to(device) / 255.0)
 
-    # Compute Spatial Weight Map
+    # Compute Spatial Weight Map if requested (edge and/or center penalties)
     spatial_weight_map = None
-    y_grid, x_grid = torch.meshgrid(torch.arange(work_h_bbox, device=device), torch.arange(work_w_bbox, device=device), indexing='ij')
     if edge_penalty > 0.0 or center_penalty > 0.0:
+        y_grid, x_grid = torch.meshgrid(torch.arange(work_h_bbox, device=device), torch.arange(work_w_bbox, device=device), indexing='ij')
+        # Normalize to [-1, 1] for both X and Y
         nx = (x_grid / (work_w_bbox - 1)) * 2.0 - 1.0
         ny = (y_grid / (work_h_bbox - 1)) * 2.0 - 1.0
+        # Chebyshev distance from the center (0 in center, 1 at edge)
         dist_from_center = torch.max(torch.abs(nx), torch.abs(ny))
+        
+        # Linearly scale penalty:
+        # edge_penalty is applied primarily at the edges (dist = 1)
+        # center_penalty is applied primarily at the center (dist = 0)
         e_weight = 1.0 + (edge_penalty * dist_from_center) + (center_penalty * (1.0 - dist_from_center))
         spatial_weight_map = e_weight.unsqueeze(0).unsqueeze(0).float()
-        
-    # Boundary Repulsion Map (Force Field against bbox edges)
-    # Penalizes any source land touching the outer 10% of the bounding box to prevent it from escaping
-    margin_pct = 0.10
-    pen_y_t = torch.clamp(1.0 - (y_grid.float() / (work_h_bbox * margin_pct)), min=0.0) if by0 > 0 else torch.zeros_like(y_grid.float())
-    pen_y_b = torch.clamp(1.0 - ((work_h_bbox - 1 - y_grid.float()) / (work_h_bbox * margin_pct)), min=0.0) if by1 < h_r - 1 else torch.zeros_like(y_grid.float())
-    pen_x_l = torch.clamp(1.0 - (x_grid.float() / (work_w_bbox * margin_pct)), min=0.0) if bx0 > 0 else torch.zeros_like(x_grid.float())
-    pen_x_r = torch.clamp(1.0 - ((work_w_bbox - 1 - x_grid.float()) / (work_w_bbox * margin_pct)), min=0.0) if bx1 < w_r - 1 else torch.zeros_like(x_grid.float())
-    border_penalty_map = torch.maximum(torch.maximum(pen_y_t, pen_y_b), torch.maximum(pen_x_l, pen_x_r)).unsqueeze(0).unsqueeze(0)
     
     # ── Phase 3: Control Point Initialization ─────────────────────
     print("\n▸ Phase 3: Initializing Control Points")
@@ -509,7 +498,10 @@ def sgd_point_warp_polygon_constrained(
             norm_grid_y = (grid_src[..., 1] / (h_s - 1)) * 2.0 - 1.0
             norm_grid = torch.stack([norm_grid_x, norm_grid_y], dim=-1).unsqueeze(0)
             
-            # Note: Deliberately NO coordinate clamping here. Smooth interpolation overshoots gracefully via padding zeros.
+            # Constrain pixels from exceeding the source image bounds
+            # This prevents clipping to black, while allowing actual control points to overshoot.
+            norm_grid = torch.clamp(norm_grid, -1.0, 1.0)
+            
             warped = F.grid_sample(src_mask_t, norm_grid, mode="bilinear", padding_mode="zeros", align_corners=True)
             
             l_dice = dice_loss_poly(warped, ref_bbox_sm, poly_mask_t)
@@ -520,10 +512,7 @@ def sgd_point_warp_polygon_constrained(
             else:
                 l_struct = bend_loss_tps(P_src_t, L_inv, len(P_ref_np))
                 
-            # Border Repulsion: prevents land from bleeding out of the padded working region (clipping)
-            l_border = (warped * border_penalty_map).sum() / (warped.sum().clamp(min=1e-8))
-                
-            loss = l_dice + l_mse + lam_fold * l_struct + 15.0 * l_border
+            loss = l_dice + l_mse + lam_fold * l_struct
             loss.backward()
             optim.step()
             
@@ -534,7 +523,7 @@ def sgd_point_warp_polygon_constrained(
                 best_P_src = P_src_t.detach().cpu().numpy()
                 
             if (step + 1) % 100 == 0 or step == steps_per_lvl - 1:
-                print(f"     step {step+1:4d} | loss={loss.item():.4f} | dice={l_dice.item():.4f} | struct={l_struct.item():.4f} | border={l_border.item():.4f}")
+                print(f"     step {step+1:4d} | loss={loss.item():.4f} | dice={l_dice.item():.4f} | struct={l_struct.item():.4f}")
 
             # ── Prune Redundant Control Points Check ────────────────
             if prune_interval > 0 and (step + 1) % prune_interval == 0 and (step + 1) < steps_per_lvl:
@@ -578,12 +567,16 @@ def sgd_point_warp_polygon_constrained(
                     final_grid = evaluate_tps(torch.from_numpy(P_src_np).to(device), L_inv, U, P_grid, work_h_bbox, work_w_bbox)
                 n_grid = torch.stack([(final_grid[..., 0]/(w_s-1))*2-1, (final_grid[..., 1]/(h_s-1))*2-1], dim=-1).unsqueeze(0)
                 
+                # Constrain pixels from exceeding the source image bounds
+                n_grid = torch.clamp(n_grid, -1.0, 1.0)
+                
                 w_mask = F.grid_sample(src_mask_t, n_grid, mode="bilinear", padding_mode="zeros", align_corners=True)
             show_mask_comparison_poly(w_mask, ref_bbox_sm, poly_mask_t, title=f"End of Level {lvl+1}")
 
         # Add Dynamic Points if not the last level
         if lvl < levels - 1:
             with torch.no_grad():
+                # Apply the spatial penalty weight to the error map so dynamic points spawn at penalized regions more aggressively
                 base_err = torch.abs(w_mask - ref_bbox_sm) * poly_mask_t
                 if spatial_weight_map is not None:
                     base_err = base_err * spatial_weight_map
@@ -621,6 +614,9 @@ def sgd_point_warp_polygon_constrained(
     norm_gx = (grid_full[..., 0] / (w_s - 1)) * 2.0 - 1.0
     norm_gy = (grid_full[..., 1] / (h_s - 1)) * 2.0 - 1.0
     norm_grid_full = torch.stack([norm_gx, norm_gy], dim=-1).unsqueeze(0)
+    
+    # Constrain pixels from exceeding the source image bounds
+    norm_grid_full = torch.clamp(norm_grid_full, -1.0, 1.0)
     
     poly_full_np = rasterise_polygon_mask(polygon, bh, bw, offset_xy=(bx0, by0))
     poly_full_t = (torch.from_numpy(poly_full_np).float() / 255.0).unsqueeze(0).unsqueeze(0).to(device)
