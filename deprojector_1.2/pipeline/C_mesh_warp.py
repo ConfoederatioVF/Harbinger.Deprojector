@@ -103,7 +103,8 @@ def apply_affine_to_points(pts: np.ndarray, src_pts: np.ndarray, ref_pts: np.nda
 
 def add_dynamic_points(
     error_map_np: np.ndarray, P_ref_np: np.ndarray, P_src_np: np.ndarray, 
-    current_grid_np: np.ndarray, n_points: int = 5, min_dist: int = 20
+    current_grid_np: np.ndarray, n_points: int = 5, min_dist: int = 20,
+    error_threshold: float = 0.05 # <--- NEW PARAMETER
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Finds high-error regions and inserts new control points there."""
     err = cv2.GaussianBlur(error_map_np.astype(np.float32), (9, 9), 0)
@@ -111,7 +112,9 @@ def add_dynamic_points(
     
     for _ in range(n_points):
         min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(err)
-        if max_val < 0.05: 
+        
+        # Check against the exposed threshold
+        if max_val < error_threshold: 
             break
             
         dist = np.linalg.norm(P_ref_np - np.array(max_loc), axis=1)
@@ -125,7 +128,6 @@ def add_dynamic_points(
         
     new_refs_np = np.array(new_refs, dtype=np.float32) if new_refs else np.empty((0, 2), dtype=np.float32)
     if new_refs:
-        # Enforce float32 concatenation to prevent double upcasting
         P_ref_np = np.vstack([P_ref_np, new_refs]).astype(np.float32)
         P_src_np = np.vstack([P_src_np, new_srcs]).astype(np.float32)
         
@@ -334,11 +336,14 @@ def sgd_point_warp_polygon_constrained(
     src_img: np.ndarray,
     extent_result: ExtentResult,
     work_h_bbox: int = 384,
-    warp_mode: str = "affine", # 'affine' or 'tps'
+    warp_mode: str = "affine",
     levels: int = 4,
     steps_per_lvl: int = 350,
     lr_init: float = 2.0,
     lam_fold: float = 0.5,
+    dyn_points_per_level: int = 8,
+    dyn_error_threshold: float = 0.05,
+    dyn_min_dist: int = 15,
     show_plots: bool = True
 ) -> Tuple[np.ndarray, np.ndarray, dict, float]:
     
@@ -464,17 +469,22 @@ def sgd_point_warp_polygon_constrained(
                 w_mask = F.grid_sample(src_mask_t, n_grid, mode="bilinear", padding_mode="zeros", align_corners=True)
             show_mask_comparison_poly(w_mask, ref_bbox_sm, poly_mask_t, title=f"End of Level {lvl+1}")
 
+        # Add Dynamic Points if not the last level
         if lvl < levels - 1:
             with torch.no_grad():
                 error_map = (torch.abs(w_mask - ref_bbox_sm) * poly_mask_t)[0, 0].cpu().numpy()
                 
             old_len = len(P_ref_np)
             old_pts_for_plot = P_ref_np.copy()
-            P_ref_np, P_src_np, new_pts = add_dynamic_points(error_map, P_ref_np, P_src_np, final_grid.cpu().numpy(), n_points=8, min_dist=15)
-            print(f"     [Dynamic] Added {len(P_ref_np) - old_len} points in high-error regions.")
             
-            if show_plots:
-                show_dynamic_points_error(error_map, old_pts_for_plot, new_pts, lvl+1)
+            # Pass the exposed variables here!
+            P_ref_np, P_src_np, new_pts = add_dynamic_points(
+                error_map, P_ref_np, P_src_np, final_grid.cpu().numpy(), 
+                n_points=dyn_points_per_level, 
+                min_dist=dyn_min_dist, 
+                error_threshold=dyn_error_threshold
+            )
+            print(f"     [Dynamic] Added {len(P_ref_np) - old_len} points in high-error regions.")
 
     if show_plots:
         ref_crop_np = ref_img[by0:by1, bx0:bx1]
