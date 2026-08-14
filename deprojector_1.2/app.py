@@ -62,13 +62,23 @@ def executePipeline():
     # Polygon-constrained control point mesh warp optimisation
     warped_result, learned_disp, detected_bbox, final_iou = (
         sgd_point_warp_polygon_constrained(
+            # Input/Output
             show_plots=True,
             ref_img=ref_img,
             src_img=src_img,
+            
+            # Jaccard Weights (utility function)
+            edge_weight=8.0, #1.0 by default
+            edge_threshold=8, #0 for fill weights only
+            fill_weight=0.5, #0.5 by default
+            
+            # Projection Settings
             extent_result=result,
             work_h_bbox=420, #420 by default
-            warp_mode="tps",   
-            levels=3, # 3 for luck; 4 for general-purpose
+            warp_mode="tps",
+            
+            # Hyperparameters
+            levels=4, # 3 for luck; 4 for general-purpose
             steps_per_lvl=1200,    
             lr_init=4.0, #2.0; 4.0 default
             lr_gain=1.6, #0.6; 1.6 by default

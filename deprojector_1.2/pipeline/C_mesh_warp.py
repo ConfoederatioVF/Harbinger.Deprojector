@@ -280,11 +280,23 @@ def bend_loss_tps(P_src: torch.Tensor, L_inv: torch.Tensor, N: int) -> torch.Ten
     W_mat = coeffs[:N, :]
     return (W_mat ** 2).mean()
 
-def dice_loss_poly(pred: torch.Tensor, target: torch.Tensor, poly_mask: torch.Tensor, smooth: float = 1.0) -> torch.Tensor:
-    p = (pred * poly_mask).reshape(-1)
-    t = (target * poly_mask).reshape(-1)
-    inter = (p * t).sum()
-    return 1.0 - (2.0 * inter + smooth) / (p.sum() + t.sum() + smooth)
+def dice_loss_poly(
+    pred: torch.Tensor, 
+    target: torch.Tensor, 
+    poly_mask: torch.Tensor, 
+    weight_map: Optional[torch.Tensor] = None, 
+    smooth: float = 1.0
+) -> torch.Tensor:
+    w = poly_mask
+    if weight_map is not None:
+        w = w * weight_map
+        
+    p = pred.reshape(-1)
+    t = target.reshape(-1)
+    w_flat = w.reshape(-1)
+    
+    inter = (w_flat * p * t).sum()
+    return 1.0 - (2.0 * inter + smooth) / ((w_flat * p).sum() + (w_flat * t).sum() + smooth)
 
 def mse_loss_poly(
     pred: torch.Tensor, target: torch.Tensor, poly_mask: torch.Tensor, 
@@ -402,7 +414,10 @@ def sgd_point_warp_polygon_constrained(
     dyn_min_dist: int = 15,
     prune_interval: int = 150,
     edge_penalty: float = 0.0,
-    center_penalty: float = 0.0, # <--- NEW PARAMETER
+    center_penalty: float = 0.0,
+    edge_threshold: int = 8,
+    edge_weight: float = 1.0,
+    fill_weight: float = 1.0,
     show_plots: bool = True
 ) -> Tuple[np.ndarray, np.ndarray, dict, float]:
     
@@ -442,7 +457,7 @@ def sgd_point_warp_polygon_constrained(
     src_rgb_np = cv2.cvtColor(src_img, cv2.COLOR_BGR2RGB)
     src_img_t = (torch.from_numpy(src_rgb_np).float().permute(2, 0, 1).unsqueeze(0).to(device) / 255.0)
 
-    # Compute Spatial Weight Map if requested (edge and/or center penalties)
+    # Compute Spatial Weight Map for MSE if requested (edge and/or center penalties via extents)
     spatial_weight_map = None
     if edge_penalty > 0.0 or center_penalty > 0.0:
         y_grid, x_grid = torch.meshgrid(torch.arange(work_h_bbox, device=device), torch.arange(work_w_bbox, device=device), indexing='ij')
@@ -453,10 +468,23 @@ def sgd_point_warp_polygon_constrained(
         dist_from_center = torch.max(torch.abs(nx), torch.abs(ny))
         
         # Linearly scale penalty:
-        # edge_penalty is applied primarily at the edges (dist = 1)
-        # center_penalty is applied primarily at the center (dist = 0)
         e_weight = 1.0 + (edge_penalty * dist_from_center) + (center_penalty * (1.0 - dist_from_center))
         spatial_weight_map = e_weight.unsqueeze(0).unsqueeze(0).float()
+        
+    # Generate Custom Binary Weight Map for Jaccard (Dice) 
+    poly_jaccard_weight_np = np.zeros_like(poly_mask_work_np, dtype=np.float32)
+    # Strictly binary map >127 mapping to 0 or 255 purely to avoid antialiasing 
+    binary_poly = (poly_mask_work_np > 127).astype(np.uint8) * 255 
+    
+    if edge_threshold > 0:
+        # Distance transform computes exact depth of polygon pixels to the edge, completely avoiding gradient aliasing
+        dist_transform = cv2.distanceTransform(binary_poly, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+        poly_jaccard_weight_np[dist_transform > edge_threshold] = fill_weight
+        poly_jaccard_weight_np[(dist_transform > 0) & (dist_transform <= edge_threshold)] = edge_weight
+    else:
+        poly_jaccard_weight_np[binary_poly > 0] = fill_weight
+        
+    jaccard_weight_map_t = torch.from_numpy(poly_jaccard_weight_np).float().unsqueeze(0).unsqueeze(0).to(device)
     
     # ── Phase 3: Control Point Initialization ─────────────────────
     print("\n▸ Phase 3: Initializing Control Points")
@@ -507,7 +535,7 @@ def sgd_point_warp_polygon_constrained(
             
             warped = F.grid_sample(src_mask_t, norm_grid, mode="bilinear", padding_mode="zeros", align_corners=True)
             
-            l_dice = dice_loss_poly(warped, ref_bbox_sm, poly_mask_t)
+            l_dice = dice_loss_poly(warped, ref_bbox_sm, poly_mask_t, weight_map=jaccard_weight_map_t)
             l_mse = mse_loss_poly(warped, ref_bbox_sm, poly_mask_t, weight_map=spatial_weight_map)
             
             if warp_mode == "affine":
