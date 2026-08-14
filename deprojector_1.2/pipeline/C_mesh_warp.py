@@ -678,6 +678,8 @@ def sgd_point_warp_polygon_constrained(
     else:
         L_inv_f, U_f, P_grid_f = precompute_tps_matrices(torch.from_numpy(P_ref_full).float().to(device), bh, bw, device)
         grid_full = evaluate_tps(torch.from_numpy(P_src_np).to(device), L_inv_f, U_f, P_grid_f, bh, bw)
+        
+    print("\nFinished rendering grid.")
 
     norm_gx = (grid_full[..., 0] / (w_s - 1)) * 2.0 - 1.0
     norm_gy = (grid_full[..., 1] / (h_s - 1)) * 2.0 - 1.0
@@ -695,6 +697,8 @@ def sgd_point_warp_polygon_constrained(
         
         warped_rgb = warped_rgb * poly_full_t
         warped_mask = warped_mask * poly_full_t
+        
+    print("\nFinished constraining grid.")
 
     # Reconstruct Canvas
     sea_color = get_sea_color(ref_img)
@@ -707,6 +711,8 @@ def sgd_point_warp_polygon_constrained(
     region = canvas_np[by0:by1, bx0:bx1]
     region[poly_hw] = warped_bbox_bgr[poly_hw]
     canvas_np[by0:by1, bx0:bx1] = region
+    
+    print("\nReconstructed canvas.")
     
     # Evaluate Final IoU
     mask_canvas = np.zeros((h_r, w_r), dtype=np.float32)

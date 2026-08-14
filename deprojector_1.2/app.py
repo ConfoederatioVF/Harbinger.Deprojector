@@ -68,9 +68,11 @@ def executePipeline():
             src_img=src_img,
             
             # Jaccard Weights (utility function)
-            edge_weight_schedule=8.0, #8.0 by default
+            # edge_weight_schedule = 8
+            edge_weight_schedule=[(0, 1), (0.6, 8), (0.8, 2), (1, 1)], #8.0 by default
             edge_threshold=8, #0 for fill weights only
-            fill_weight_schedule=0.5, #0.5 by default
+            # fill_weight_schedule = 0.5
+            fill_weight_schedule=[(0, 1), (0.6, 0.5), (0.8, 0.5), (1, 0.5)], #0.5 by default
             
             # Projection Settings
             extent_result=result,
@@ -78,11 +80,11 @@ def executePipeline():
             warp_mode="tps",
             
             # Hyperparameters
-            levels=4, # 3 for luck; 4 for general-purpose
+            levels=5, # 3 for luck; 4 for general-purpose
             steps_per_lvl=1200,    
             lr_init=4.0, #2.0; 4.0 default
-            lr_gain=0.6, #0.6; 1.6 by default
-            lam_fold=2.0, #2.0 tends to yield best results
+            lr_gain=1.0, #0.6; 1.6 by default
+            lam_fold=4.0, #2.0 tends to yield best results; 4.0 for edge consistency
             points_gain=1.5, #1.5 by default
             dyn_points_per_level=24, #24   
             dyn_error_threshold=0, #0       
