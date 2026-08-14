@@ -68,9 +68,9 @@ def executePipeline():
             src_img=src_img,
             
             # Jaccard Weights (utility function)
-            edge_weight=8.0, #8.0 by default
+            edge_weight_schedule=8.0, #8.0 by default
             edge_threshold=8, #0 for fill weights only
-            fill_weight=0.5, #0.5 by default
+            fill_weight_schedule=0.5, #0.5 by default
             
             # Projection Settings
             extent_result=result,

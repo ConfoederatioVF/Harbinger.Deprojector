@@ -5,7 +5,7 @@ Affine Triangulation (barycentric rendering) and Thin Plate Spline (TPS) modes.
 Points are dynamically added to high-error regions and pruned if redundant during segmentation.
 """
 
-from typing import Tuple, Optional, Any, Callable, List
+from typing import Tuple, Optional, Any, Callable, List, Union
 
 import cv2
 import math
@@ -264,7 +264,7 @@ def evaluate_tps(P_src: torch.Tensor, L_inv: torch.Tensor, U: torch.Tensor, P_gr
     return grid_out.view(H, W, 2)
 
 # ─────────────────────────────────────────────────────────────────────
-# 4. LOSS FUNCTIONS
+# 4. LOSS FUNCTIONS & SCHEDULE EVALUATORS
 # ─────────────────────────────────────────────────────────────────────
 
 def fold_loss_affine(P_src: torch.Tensor, simplices: np.ndarray) -> torch.Tensor:
@@ -307,6 +307,30 @@ def mse_loss_poly(
     if weight_map is not None:
         diff_sq = diff_sq * weight_map
     return diff_sq.sum() / n
+
+def evaluate_keyframe_curve(curve: Union[float, List[Tuple[float, float]]], t: float) -> float:
+    """Evaluates a keyframe curve (List of (progress, value)) at a given time progress `t` [0.0, 1.0]"""
+    if isinstance(curve, (int, float)):
+        return float(curve)
+    if not curve: 
+        return 1.0
+    if len(curve) == 1: 
+        return curve[0][1]
+        
+    # Ensure it's sorted by progress (the first element of the tuple)
+    curve = sorted(curve, key=lambda x: x[0])
+    
+    if t <= curve[0][0]: return curve[0][1]
+    if t >= curve[-1][0]: return curve[-1][1]
+    
+    for i in range(len(curve) - 1):
+        t0, v0 = curve[i]
+        t1, v1 = curve[i+1]
+        if t0 <= t <= t1:
+            ratio = (t - t0) / (t1 - t0) if t1 > t0 else 0.0
+            return v0 + ratio * (v1 - v0)
+            
+    return curve[-1][1]
 
 # ─────────────────────────────────────────────────────────────────────
 # 5. VISUALIZATION HELPERS
@@ -416,8 +440,8 @@ def sgd_point_warp_polygon_constrained(
     edge_penalty: float = 0.0,
     center_penalty: float = 0.0,
     edge_threshold: int = 8,
-    edge_weight: float = 1.0,
-    fill_weight: float = 1.0,
+    edge_weight_schedule: Union[float, List[Tuple[float, float]]] = 1.0,
+    fill_weight_schedule: Union[float, List[Tuple[float, float]]] = 1.0,
     show_plots: bool = True
 ) -> Tuple[np.ndarray, np.ndarray, dict, float]:
     
@@ -471,20 +495,20 @@ def sgd_point_warp_polygon_constrained(
         e_weight = 1.0 + (edge_penalty * dist_from_center) + (center_penalty * (1.0 - dist_from_center))
         spatial_weight_map = e_weight.unsqueeze(0).unsqueeze(0).float()
         
-    # Generate Custom Binary Weight Map for Jaccard (Dice) 
-    poly_jaccard_weight_np = np.zeros_like(poly_mask_work_np, dtype=np.float32)
+    # Pre-compute boolean masks mapping the custom edge boundary and internal fill on the GPU
     # Strictly binary map >127 mapping to 0 or 255 purely to avoid antialiasing 
     binary_poly = (poly_mask_work_np > 127).astype(np.uint8) * 255 
     
     if edge_threshold > 0:
         # Distance transform computes exact depth of polygon pixels to the edge, completely avoiding gradient aliasing
         dist_transform = cv2.distanceTransform(binary_poly, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
-        poly_jaccard_weight_np[dist_transform > edge_threshold] = fill_weight
-        poly_jaccard_weight_np[(dist_transform > 0) & (dist_transform <= edge_threshold)] = edge_weight
+        dist_t = torch.from_numpy(dist_transform).float().unsqueeze(0).unsqueeze(0).to(device)
+        fill_mask_t = dist_t > edge_threshold
+        edge_mask_t = (dist_t > 0) & (dist_t <= edge_threshold)
     else:
-        poly_jaccard_weight_np[binary_poly > 0] = fill_weight
-        
-    jaccard_weight_map_t = torch.from_numpy(poly_jaccard_weight_np).float().unsqueeze(0).unsqueeze(0).to(device)
+        binary_t = torch.from_numpy(binary_poly).float().unsqueeze(0).unsqueeze(0).to(device)
+        fill_mask_t = binary_t > 0
+        edge_mask_t = torch.zeros_like(fill_mask_t)
     
     # ── Phase 3: Control Point Initialization ─────────────────────
     print("\n▸ Phase 3: Initializing Control Points")
@@ -501,7 +525,17 @@ def sgd_point_warp_polygon_constrained(
     
     for lvl in range(levels):
         lr = lr_init * (lr_gain ** lvl)
-        print(f"  ── Level {lvl + 1}/{levels} | Points: {len(P_ref_np)} | LR: {lr:.4f}")
+        lvl_progress = lvl / max(1, levels - 1)
+        
+        curr_edge_weight = evaluate_keyframe_curve(edge_weight_schedule, lvl_progress)
+        curr_fill_weight = evaluate_keyframe_curve(fill_weight_schedule, lvl_progress)
+        
+        print(f"  ── Level {lvl + 1}/{levels} | Points: {len(P_ref_np)} | LR: {lr:.4f} | Edge Wt: {curr_edge_weight:.2f} | Fill Wt: {curr_fill_weight:.2f}")
+
+        # Update Jaccard weight map natively on GPU for the current curve's step values
+        jaccard_weight_map_t = torch.zeros_like(poly_mask_t)
+        jaccard_weight_map_t[fill_mask_t] = curr_fill_weight
+        jaccard_weight_map_t[edge_mask_t] = curr_edge_weight
         
         if warp_mode == "affine":
             idx_t, wt_t, current_simplices = precompute_affine_barycentric(P_ref_np, work_h_bbox, work_w_bbox)
