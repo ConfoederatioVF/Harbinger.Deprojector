@@ -43,7 +43,7 @@ Requirements:
 
 ## Usage:
 
-Deprojector is designed to be run from the command line. It takes in `from_projection.png` as its source image, and will try to mesh warp it to a black and white `to_projection.png` image.
+Deprojector is designed to be run from the command line. It takes in `from_projection.png` as its source image, and will try to mesh warp it to a black and white `to_projection.png` image. Deprojector versions can be selected from the base folder as `deprojector_<version>/`.
 
 Input files:
 - `from_projection.png`
